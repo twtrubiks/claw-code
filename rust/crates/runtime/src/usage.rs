@@ -65,7 +65,7 @@ impl UsageCostEstimate {
 
 /// Returns pricing metadata for a known model alias or family.
 ///
-/// Rates follow <https://platform.claude.com/docs/en/about-claude/pricing>, using
+/// Anthropic rates follow <https://platform.claude.com/docs/en/about-claude/pricing>, using
 /// 5-minute cache writes. Unversioned ids fall back to the tier the bare alias resolves to.
 #[must_use]
 pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
@@ -103,6 +103,24 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
             Some((5, 0)) => ModelPricing::per_million(2.0, 10.0, 2.5, 0.2),
             _ => ModelPricing::default_sonnet_tier(),
         });
+    }
+    // DeepSeek API peak rates (<https://api-docs.deepseek.com/quick_start/pricing>);
+    // off-peak usage is billed at half. Cache misses are billed as regular input,
+    // with no separate cache-write charge. The retired `deepseek-chat` and
+    // `deepseek-reasoner` ids were served by V4 Flash.
+    if normalized.contains("deepseek-v4-pro") {
+        return Some(ModelPricing::per_million(1.32, 3.96, 1.32, 0.044));
+    }
+    if [
+        "deepseek-flash",
+        "deepseek-v4-flash",
+        "deepseek-chat",
+        "deepseek-reasoner",
+    ]
+    .iter()
+    .any(|id| normalized.contains(id))
+    {
+        return Some(ModelPricing::per_million(0.3, 1.2, 0.3, 0.006));
     }
     None
 }
@@ -350,6 +368,32 @@ mod tests {
         assert_eq!(cache_read_for("claude-fable-5"), "$1.0000");
         assert_eq!(cache_read_for("claude-sonnet-5-5"), "$0.1000");
         assert_eq!(cache_read_for("claude-sonnet-5"), "$0.2000");
+    }
+
+    #[test]
+    fn prices_deepseek_api_models_at_peak_rates() {
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 1_000_000,
+        };
+        let total_for = |model: &str| {
+            let pricing = pricing_for_model(model).expect("known model pricing");
+            format_usd(
+                usage
+                    .estimate_cost_usd_with_pricing(pricing)
+                    .total_cost_usd(),
+            )
+        };
+
+        assert_eq!(total_for("deepseek-v4-pro"), "$3.3440");
+        assert_eq!(total_for("openai/deepseek-v4-pro"), "$3.3440");
+        assert_eq!(total_for("deepseek-flash"), "$0.9060");
+        assert_eq!(total_for("deepseek/deepseek-v4-flash"), "$0.9060");
+        assert_eq!(total_for("deepseek-reasoner"), "$0.9060");
+        // Third-party hosts set their own prices for other DeepSeek models.
+        assert_eq!(pricing_for_model("deepseek-r1"), None);
     }
 
     #[test]
